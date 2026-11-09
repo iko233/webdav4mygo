@@ -2,7 +2,7 @@ const t = host.t;
 const folderCache = new Map();
 const cacheLifetime = 120_000;
 const folderLimit = 512;
-const searchPageSize = 50;
+const pageSize = 50;
 const audioTypes = new Set(["mp3", "flac", "wav", "m4a", "aac", "ogg"]);
 const propfind = '<propfind xmlns="DAV:"><prop><resourcetype/></prop></propfind>';
 
@@ -209,6 +209,7 @@ function listFolder(settings, folder, timeout = 8_000) {
 
 export function setSetting() {
   folderCache.clear();
+  durationCache.clear();
 }
 
 function readId(settings, id, isFolder) {
@@ -233,24 +234,86 @@ function track(settings, path, name) {
   return { id: itemId(settings, path), name: name.replace(/\.[^.]+$/, "") || name };
 }
 
+function pageLinks(offset, more, pageFor) {
+  const links = [];
+  if (offset) links.push({ title: t("Previous page"), page: pageFor(offset - pageSize) });
+  if (more) links.push({ title: t("Next page"), page: pageFor(offset + pageSize) });
+  return links.length ? [{ links }] : [];
+}
+
+export function home() {
+  return allMusic(config(), 0);
+}
+
 export async function browse({ page }) {
   const settings = config();
-  const folder = page === "root" ? settings.root : readId(settings, page, true);
+  const all = /^all:(\d+)$/.exec(page);
+  if (all) return allMusic(settings, Number(all[1]));
+
+  const paged = /^folder:(\d+):(.+)$/.exec(page);
+  const offset = paged ? Number(paged[1]) : 0;
+  const folder = page === "root" ? settings.root : readId(settings, paged ? paged[2] : page, true);
   const links = [];
-  const tracks = [];
+  const files = [];
   if (folder !== settings.root) {
     const parent = folder.slice(0, folder.lastIndexOf("/", folder.length - 2) + 1);
     links.push({ title: t("Parent folder"), page: itemId(settings, parent) });
   }
-  for (const [path, name] of await listFolder(settings, folder)) {
+  for (const entry of await listFolder(settings, folder)) {
+    const [path, name] = entry;
     if (path.endsWith("/")) links.push({ title: name, page: itemId(settings, path) });
-    else tracks.push(track(settings, path, name));
+    else files.push(entry);
   }
+  const tracks = await tracksWithDuration(settings, files.slice(offset, offset + pageSize));
   return {
     title: folder === settings.root ? t("Music folders") : basename(folder),
     sections: [
-      ...(links.length ? [{ title: t("Folders"), links }] : []),
+      { title: t("Subfolders"), links, empty: t("No subfolders.") },
       { title: t("Tracks"), tracks, empty: t("No supported audio files in this folder.") },
+      ...pageLinks(offset, files.length > offset + pageSize, n => `folder:${n}:${itemId(settings, folder)}`),
+    ],
+  };
+}
+
+async function catalogPage(settings, offset, terms) {
+  const folders = [settings.root];
+  const files = [];
+  let matched = 0;
+  const deadline = Date.now() + 17_000;
+  for (let index = 0; index < folders.length;) {
+    const timeout = Math.min(8_000, deadline - Date.now());
+    if (timeout <= 0) throw fail(t("The music scan timed out. Try again or choose a smaller music folder."));
+    if (index >= folderLimit) throw fail(t("The music scan covers up to 512 folders. Choose a smaller music folder."));
+    const batch = folders.slice(index, Math.min(index + 6, folderLimit));
+    index += batch.length;
+    const listings = await Promise.all(batch.map(folder => listFolder(settings, folder, timeout)));
+    for (const listing of listings) {
+      for (const entry of listing) {
+        const [path] = entry;
+        if (path.endsWith("/")) {
+          folders.push(path);
+          continue;
+        }
+        const relative = terms.length ? decodeURIComponent(path.slice(settings.root.length)).toLowerCase() : "";
+        if (!terms.every(term => relative.includes(term))) continue;
+        if (matched++ >= offset) files.push(entry);
+        if (files.length > pageSize) return { files: files.slice(0, pageSize), more: true };
+      }
+    }
+  }
+  return { files, more: false };
+}
+
+async function allMusic(settings, offset) {
+  const { files, more } = await catalogPage(settings, offset, []);
+  return {
+    title: t("All music"),
+    subtitle: t("Page {number}").replace("{number}", String(offset / pageSize + 1)),
+    sections: [
+      // The app shows the first Home section as a card if it contains tracks.
+      { links: [{ title: t("Music folders"), page: "root" }] },
+      { title: t("Tracks"), tracks: await tracksWithDuration(settings, files), empty: t("No supported audio files found.") },
+      ...pageLinks(offset, more, n => `all:${n}`),
     ],
   };
 }
@@ -261,31 +324,8 @@ export async function search({ query, kind, offset = 0 }) {
   if (!terms.length) return { tracks: [], more: false };
 
   const settings = config();
-  const folders = [settings.root];
-  const matches = [];
-  const deadline = Date.now() + 22_000;
-  for (let index = 0; index < folders.length;) {
-    const timeout = Math.min(8_000, deadline - Date.now());
-    if (timeout <= 0) throw fail(t("Search timed out. Try again or choose a smaller WebDAV music folder."));
-    const batch = folders.slice(index, index + 6);
-    index += batch.length;
-    const listings = await Promise.all(batch.map(folder => listFolder(settings, folder, timeout)));
-    for (const listing of listings) {
-      for (const [path, name] of listing) {
-        if (path.endsWith("/")) {
-          folders.push(path);
-        } else {
-          const relative = decodeURIComponent(path.slice(settings.root.length)).toLowerCase();
-          if (terms.every(term => relative.includes(term))) matches.push(track(settings, path, name));
-        }
-      }
-    }
-    if (matches.length > offset + searchPageSize) break;
-    if (folders.length > folderLimit) {
-      throw fail(t("Search covers up to 512 folders. Choose a smaller WebDAV music folder."));
-    }
-  }
-  return { tracks: matches.slice(offset, offset + searchPageSize), more: matches.length > offset + searchPageSize };
+  const { files, more } = await catalogPage(settings, offset, terms);
+  return { tracks: await tracksWithDuration(settings, files), more };
 }
 
 export function stream({ id }) {
@@ -294,4 +334,250 @@ export function stream({ id }) {
   const type = audioType(path);
   if (!type) throw fail(t("This audio format is unsupported."), "unavailable");
   return { url: settings.origin + path, type, headers: settings.headers };
+}
+
+const durationCache = new Map();
+const probeBytes = 16 * 1024;
+
+async function readAudioRange(url, headers, signal, start, count) {
+  const response = await fetch(url, {
+    headers: { ...headers, Range: `bytes=${start}-${start + count - 1}` },
+    redirect: "error",
+    signal,
+  });
+  const reader = response.body?.getReader();
+  if (!reader) return null;
+
+  try {
+    const range = /^bytes (\d+)-(\d+)\/(\d+|\*)$/i.exec(response.headers.get("content-range") || "");
+    const partial = response.status === 206 && range && Number(range[1]) === start;
+    if (!partial && (response.status !== 200 || start !== 0)) return null;
+    const size = Number(partial ? range[3] : response.headers.get("content-length"));
+    const bytes = new Uint8Array(count);
+    let length = 0;
+    while (length < count) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const chunk = value.subarray(0, count - length);
+      bytes.set(chunk, length);
+      length += chunk.length;
+    }
+    return { bytes: bytes.subarray(0, length), size };
+  } finally {
+    try { await reader.cancel(); } catch { /* The request may already be closed. */ }
+  }
+}
+
+function data(bytes) {
+  return new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+}
+
+function ascii(bytes, offset, text) {
+  for (let i = 0; i < text.length; i++) {
+    if (bytes[offset + i] !== text.charCodeAt(i)) return false;
+  }
+  return true;
+}
+
+function uint64(view, offset, little = false) {
+  const low = view.getUint32(offset + (little ? 0 : 4), little);
+  const high = view.getUint32(offset + (little ? 4 : 0), little);
+  return high * 0x100000000 + low;
+}
+
+function id3Length(bytes) {
+  if (bytes.length < 10 || !ascii(bytes, 0, "ID3")) return 0;
+  const size = (bytes[6] << 21) + (bytes[7] << 14) + (bytes[8] << 7) + bytes[9];
+  return 10 + size + (bytes[3] === 4 && (bytes[5] & 0x10) ? 10 : 0);
+}
+
+function flacSeconds(bytes) {
+  if (bytes.length < 42 || !ascii(bytes, 0, "fLaC") || (bytes[4] & 127) !== 0) return 0;
+  const view = data(bytes);
+  const info = view.getUint32(18);
+  const samples = (info & 15) * 0x100000000 + view.getUint32(22);
+  return samples / (info >>> 12);
+}
+
+async function wavSeconds(bytes, read) {
+  if (!ascii(bytes, 0, "RIFF") || !ascii(bytes, 8, "WAVE")) return 0;
+  let byteRate = 0;
+  let audioBytes = 0;
+  let offset = 12;
+  for (let i = 0; i < 40; i++) {
+    const chunk = await read(offset, 20);
+    if (chunk.length < 8) break;
+    const view = data(chunk);
+    const length = view.getUint32(4, true);
+    if (ascii(chunk, 0, "fmt ") && length >= 16 && chunk.length >= 20) byteRate = view.getUint32(16, true);
+    if (ascii(chunk, 0, "data")) audioBytes = length;
+    if (byteRate && audioBytes) return audioBytes / byteRate;
+    offset += 8 + length + (length % 2);
+  }
+  return 0;
+}
+
+function mp3Frame(bytes, i) {
+  if (bytes[i] !== 255 || (bytes[i + 1] & 0xe6) !== 0xe2) return null;
+  const version = (bytes[i + 1] >> 3) & 3;
+  const rateIndex = (bytes[i + 2] >> 2) & 3;
+  const bitrateIndex = bytes[i + 2] >> 4;
+  if (version === 1 || rateIndex === 3 || bitrateIndex === 0 || bitrateIndex === 15) return null;
+  const mpeg1 = version === 3;
+  const rate = [44100, 48000, 32000][rateIndex] / (mpeg1 ? 1 : version === 2 ? 2 : 4);
+  const bitrates = mpeg1 ? [32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320] :
+    [8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160];
+  const bitrate = bitrates[bitrateIndex - 1] * 1000;
+  const samples = mpeg1 ? 1152 : 576;
+  const length = Math.floor(samples * bitrate / (8 * rate)) + ((bytes[i + 2] >> 1) & 1);
+  const mono = (bytes[i + 3] >> 6) === 3;
+  const side = mpeg1 ? (mono ? 17 : 32) : (mono ? 9 : 17);
+  return { rate, bitrate, samples, length, side };
+}
+
+function mp3Seconds(bytes, size) {
+  const view = data(bytes);
+  for (let i = 0; i + 48 < bytes.length; i++) {
+    const frame = mp3Frame(bytes, i);
+    if (!frame || mp3Frame(bytes, i + frame.length)?.rate !== frame.rate) continue;
+    for (const marker of [i + 4 + frame.side, i + 6 + frame.side]) {
+      if ((ascii(bytes, marker, "Xing") || ascii(bytes, marker, "Info")) && (view.getUint32(marker + 4) & 1)) {
+        return view.getUint32(marker + 8) * frame.samples / frame.rate;
+      }
+    }
+    if (i + 54 <= bytes.length && ascii(bytes, i + 36, "VBRI")) {
+      return view.getUint32(i + 50) * frame.samples / frame.rate;
+    }
+    return (size - i) * 8 / frame.bitrate;
+  }
+  return 0;
+}
+
+function aacSeconds(bytes, size) {
+  const rates = [96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350];
+  let length = 0;
+  let seconds = 0;
+  let frames = 0;
+  for (let i = 0; i + 7 <= bytes.length;) {
+    const rate = rates[(bytes[i + 2] >> 2) & 15];
+    const frameLength = ((bytes[i + 3] & 3) << 11) + (bytes[i + 4] << 3) + (bytes[i + 5] >> 5);
+    if (bytes[i] !== 255 || (bytes[i + 1] & 0xf6) !== 0xf0 || !rate || frameLength < 7) break;
+    if (i + frameLength > bytes.length) break;
+    length += frameLength;
+    seconds += 1024 * ((bytes[i + 6] & 3) + 1) / rate;
+    frames++;
+    i += frameLength;
+  }
+  return frames >= 2 ? seconds * size / length : 0;
+}
+
+async function mp4Seconds(size, read) {
+  if (!(size > 0)) return 0;
+  let offset = 0;
+  let end = size;
+  let inMovie = false;
+  for (let i = 0; i < 48 && offset + 8 <= end; i++) {
+    const box = await read(offset, 16);
+    if (box.length < 8) break;
+    const view = data(box);
+    let length = view.getUint32(0);
+    const header = length === 1 ? 16 : 8;
+    if (box.length < header) break;
+    if (length === 1) length = uint64(view, 8);
+    if (length === 0) length = end - offset;
+    if (length < header || length > end - offset) break;
+    if (!inMovie && ascii(box, 4, "moov")) {
+      inMovie = true;
+      end = offset + length;
+      offset += header;
+      continue;
+    }
+    if (inMovie && ascii(box, 4, "mvhd")) {
+      const body = await read(offset + header, Math.min(length - header, 32));
+      const values = data(body);
+      if (body[0] === 0 && body.length >= 20) return values.getUint32(16) / values.getUint32(12);
+      if (body[0] === 1 && body.length >= 32) return uint64(values, 24) / values.getUint32(20);
+      break;
+    }
+    offset += length;
+  }
+  return 0;
+}
+
+async function oggSeconds(bytes, size, read) {
+  if (bytes.length < 28 || !ascii(bytes, 0, "OggS") || !(size > 0)) return 0;
+  const packet = 27 + bytes[26];
+  if (packet + 16 > bytes.length || bytes[packet] !== 1 || !ascii(bytes, packet + 1, "vorbis")) return 0;
+  const rate = data(bytes).getUint32(packet + 12, true);
+  const serial = data(bytes).getUint32(14, true);
+  const tailSize = Math.min(size, 64 * 1024);
+  const tail = await read(size - tailSize, tailSize);
+  const view = data(tail);
+  for (let i = tail.length - 27; i >= 0; i--) {
+    if (!ascii(tail, i, "OggS") || tail[i + 4] !== 0 || !(tail[i + 5] & 4)) continue;
+    if (view.getUint32(i + 14, true) === serial) return uint64(view, i + 6, true) / rate;
+  }
+  return 0;
+}
+
+async function probeDuration(settings, path, signal) {
+  const url = settings.origin + path;
+  const head = await readAudioRange(url, settings.headers, signal, 0, probeBytes);
+  if (!head) return 0;
+
+  let window = { start: 0, bytes: head.bytes };
+  const read = async (start, count) => {
+    if (head.size > 0) count = Math.min(count, head.size - start);
+    if (count <= 0) return new Uint8Array();
+    const offset = start - window.start;
+    if (offset >= 0 && offset + count <= window.bytes.length) return window.bytes.subarray(offset, offset + count);
+    const range = await readAudioRange(url, settings.headers, signal, start, Math.max(count, 2048));
+    window = { start, bytes: range?.bytes ?? new Uint8Array() };
+    return window.bytes.subarray(0, count);
+  };
+
+  const type = audioType(path);
+  let seconds;
+  if (type === "m4a") seconds = await mp4Seconds(head.size, read);
+  else if (type === "wav") seconds = await wavSeconds(head.bytes, read);
+  else if (type === "ogg") seconds = await oggSeconds(head.bytes, head.size, read);
+  else {
+    const start = id3Length(head.bytes);
+    const bytes = start ? await read(start, probeBytes) : head.bytes;
+    if (type === "flac") seconds = flacSeconds(bytes);
+    if (type === "mp3") seconds = mp3Seconds(bytes, head.size - start);
+    if (type === "aac") seconds = aacSeconds(bytes, head.size - start);
+  }
+  return Number.isFinite(seconds) && seconds > 0 && seconds < 31536000 ? Math.round(seconds * 1000) : 0;
+}
+
+async function tracksWithDuration(settings, files) {
+  const tracks = files.map(([path, name]) => track(settings, path, name));
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 6_000);
+  let next = 0;
+  async function worker() {
+    while (!controller.signal.aborted && next < files.length) {
+      const index = next++;
+      const key = tracks[index].id;
+      const cached = durationCache.get(key);
+      let duration = cached?.until > Date.now() ? cached.duration : undefined;
+      if (duration === undefined) {
+        try {
+          duration = await probeDuration(settings, files[index][0], controller.signal);
+          durationCache.set(key, { duration, until: Date.now() + (duration ? 600_000 : 120_000) });
+          if (durationCache.size > 4096) durationCache.delete(durationCache.keys().next().value);
+        } catch {
+          // Metadata is optional. The track stays playable if probing fails.
+        }
+      }
+      if (duration) tracks[index].duration = duration;
+    }
+  }
+  try {
+    await Promise.all(Array.from({ length: Math.min(files.length, 8) }, worker));
+    return tracks;
+  } finally {
+    clearTimeout(timer);
+  }
 }

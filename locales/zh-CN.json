@@ -6,7 +6,6 @@
   "Password or app password": "密码或应用密码",
   "MyGo Music stores this value as plain text. Use a read-only account or a dedicated app password.": "MyGo Music 会以明文保存此值。请使用只读账号或专用应用密码。",
   "Music folders": "音乐文件夹",
-  "Folders": "文件夹",
   "Tracks": "歌曲",
   "Parent folder": "上一级",
   "No supported audio files in this folder.": "此目录没有支持的音频文件。",
@@ -20,7 +19,14 @@
   "WebDAV could not list the folder.": "WebDAV 目录读取失败。",
   "The WebDAV server took too long to respond.": "WebDAV 服务器响应超时。",
   "This item is outside the current WebDAV music folder.": "此项目不在当前 WebDAV 音乐目录内。",
-  "Search timed out. Try again or choose a smaller WebDAV music folder.": "搜索超时。请重试，或把 WebDAV 地址设为更具体的音乐目录。",
-  "Search covers up to 512 folders. Choose a smaller WebDAV music folder.": "搜索最多扫描 512 个文件夹。请把 WebDAV 地址设为更具体的音乐目录。",
-  "This audio format is unsupported.": "播放器不支持此音频格式。"
+  "This audio format is unsupported.": "播放器不支持此音频格式。",
+  "All music": "全部音乐",
+  "Subfolders": "子文件夹",
+  "No subfolders.": "当前目录没有子文件夹。",
+  "Previous page": "上一页",
+  "Next page": "下一页",
+  "Page {number}": "第 {number} 页",
+  "No supported audio files found.": "没有找到支持的音频文件。",
+  "The music scan timed out. Try again or choose a smaller music folder.": "读取音乐目录超时。请重试，或设定更具体的音乐目录。",
+  "The music scan covers up to 512 folders. Choose a smaller music folder.": "最多扫描 512 个文件夹。请设定更具体的音乐目录。"
 }

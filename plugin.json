@@ -1,7 +1,7 @@
 {
   "id": "webdav4mygo",
   "name": "WebDAV",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "minAppVersion": "0.1.22",
   "main": "index.js",
   "playback": "stream",
@@ -11,5 +11,8 @@
     { "key": "username", "label": "Username", "help": "Leave blank for an anonymous server." },
     { "key": "password", "label": "Password or app password", "help": "MyGo Music stores this value as plain text. Use a read-only account or a dedicated app password." }
   ],
-  "navigation": [{ "title": "Music folders", "page": "root" }]
+  "navigation": [
+    { "builtin": "home", "title": "All music", "icon": "playlist" },
+    { "title": "Music folders", "page": "root" }
+  ]
 }
