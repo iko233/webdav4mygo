@@ -470,20 +470,30 @@ export function stream({ id }) {
 const metadataCache = new Map();
 const probeBytes = 16 * 1024;
 
-async function readAudioRange(url, headers, signal, start, count) {
+async function readAudioRange(url, headers, signal, start, count, useRange = true) {
+  const end = start + count;
+  const prefixLimit = maxTagBytes + probeBytes;
+  if (!useRange && end > prefixLimit) return null;
+
   const response = await fetch(url, {
-    headers: { ...headers, Range: `bytes=${start}-${start + count - 1}` },
+    headers: useRange ? { ...headers, Range: `bytes=${start}-${end - 1}` } : headers,
     redirect: "error",
     signal,
   });
   const range = /^bytes (\d+)-(\d+)\/(\d+|\*)$/i.exec(response.headers.get("content-range") || "");
-  const partial = response.status === 206 && range && Number(range[1]) === start;
-  if (!partial && (response.status !== 200 || start !== 0)) {
-    await response.body?.cancel();
-    return null;
+  if (response.status === 206 && range && Number(range[1]) === start) {
+    return { bytes: await readResponseBytes(response, count), size: Number(range[3]), partial: true };
   }
-  const size = Number(partial ? range[3] : response.headers.get("content-length"));
-  return { bytes: await readResponseBytes(response, count), size };
+  if (response.status === 200 && end <= prefixLimit) {
+    const size = Number(response.headers.get("content-length"));
+    const prefix = await readResponseBytes(response, end);
+    return { bytes: prefix.subarray(start), size, partial: false };
+  }
+  await response.body?.cancel();
+  if (useRange && [400, 403, 405, 416, 501].includes(response.status)) {
+    return readAudioRange(url, headers, signal, start, count, false);
+  }
+  return null;
 }
 
 async function readResponseBytes(response, count) {
@@ -669,7 +679,7 @@ async function probeMetadata(settings, path, signal) {
     const offset = start - window.start;
     if (offset >= 0 && offset + count <= window.bytes.length) return window.bytes.subarray(offset, offset + count);
     if (start + count <= head.bytes.length) return head.bytes.subarray(start, start + count);
-    const range = await readAudioRange(url, settings.headers, signal, start, Math.max(count, 2048));
+    const range = await readAudioRange(url, settings.headers, signal, start, Math.max(count, 2048), head.partial);
     window = { start, bytes: range?.bytes ?? new Uint8Array() };
     return window.bytes.subarray(0, count);
   };
