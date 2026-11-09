@@ -216,6 +216,7 @@ export function setSetting() {
   folderCache.clear();
   metadataCache.clear();
   sidecarCache.clear();
+  folderCoverCache.clear();
 }
 
 function readId(settings, id, isFolder) {
@@ -260,9 +261,12 @@ function playlistEntry(settings, folder, name) {
 export async function playlists() {
   if (!host.setting("server")?.trim()) return [];
   const settings = config();
-  return (await listFolder(settings, settings.root))
-    .filter(([path]) => path.endsWith("/"))
-    .map(([path, name]) => playlistEntry(settings, path, name));
+  const folders = (await listFolder(settings, settings.root)).filter(([path]) => path.endsWith("/"));
+  const artwork = await folderCovers(settings, folders);
+  return folders.map(([path, name]) => ({
+    ...playlistEntry(settings, path, name),
+    imageUrl: artwork.get(path) || blankFolderCover(),
+  }));
 }
 
 export async function playlist({ id }) {
@@ -275,7 +279,7 @@ export async function playlist({ id }) {
     ...playlistEntry(settings, folder, folder === settings.root ? t("Music folders") : basename(folder)),
     trackCount: tracks.length,
     tracks,
-    imageUrl: tracks.find(track => track.album?.imageUrl)?.album.imageUrl,
+    imageUrl: tracks.find(track => track.album?.imageUrl)?.album.imageUrl || blankFolderCover(),
   };
 }
 
@@ -316,17 +320,24 @@ export async function browse({ page }) {
   const offset = paged ? Number(paged[1]) : 0;
   const folder = page === "root" ? settings.root : readId(settings, paged ? paged[2] : page, true);
   const links = [];
+  const children = [];
   const files = [];
   if (folder !== settings.root) {
     const parent = folder.slice(0, folder.lastIndexOf("/", folder.length - 2) + 1);
     links.push({ title: t("Parent folder"), page: itemId(settings, parent) });
   }
   for (const entry of await listFolder(settings, folder)) {
-    const [path, name] = entry;
-    if (path.endsWith("/")) links.push({ title: name, page: itemId(settings, path) });
+    const [path] = entry;
+    if (path.endsWith("/")) children.push(entry);
     else if (audioType(path)) files.push(entry);
   }
-  const tracks = await tracksWithMetadata(settings, files.slice(offset, offset + pageSize));
+  const [tracks, artwork] = await Promise.all([
+    tracksWithMetadata(settings, files.slice(offset, offset + pageSize)),
+    folderCovers(settings, children),
+  ]);
+  for (const [path, name] of children) {
+    links.push({ title: name, page: itemId(settings, path), imageUrl: artwork.get(path) || blankFolderCover() });
+  }
   return {
     title: folder === settings.root ? t("Music folders") : basename(folder),
     sections: [
@@ -752,6 +763,82 @@ async function metadataFor(settings, path, name, signal) {
   return metadata;
 }
 
+const folderCoverCache = new Map();
+
+function blankFolderCover() {
+  const path = host.dir.replace(/\\/g, "/").split("/").map(encodeURIComponent).join("/");
+  return `file://${path.startsWith("/") ? "" : "/"}${path}/assets/blank.png`;
+}
+
+function cachedMetadata(settings, path) {
+  const cached = metadataCache.get(itemId(settings, path));
+  if (cached?.until > Date.now()) return cached.metadata;
+}
+
+async function readMetadata(settings, entry, signal) {
+  const [path, name] = entry;
+  const cached = cachedMetadata(settings, path);
+  if (cached || signal.aborted) return cached;
+  try {
+    const metadata = await metadataFor(settings, path, name, signal);
+    if (!signal.aborted) {
+      metadataCache.set(itemId(settings, path), { metadata, until: Date.now() + 600_000 });
+      if (metadataCache.size > 4096) metadataCache.delete(metadataCache.keys().next().value);
+    }
+    return metadata;
+  } catch {
+    // Metadata is optional. The track stays playable if probing fails.
+  }
+}
+
+function folderCover(settings, path, signal) {
+  const key = itemId(settings, path);
+  const cached = folderCoverCache.get(key);
+  if (cached?.until > Date.now()) return cached.result;
+
+  const result = (async () => {
+    const listing = await listFolder(settings, path, 4_000);
+    const files = listing.filter(([file]) => audioType(file) && !file.endsWith("/"));
+    for (const [file] of files) {
+      const cover = cachedMetadata(settings, file)?.cover;
+      if (cover) return cover;
+    }
+    for (const entry of files) {
+      if (signal.aborted) return;
+      const meta = await readMetadata(settings, entry, signal);
+      if (meta?.cover) return meta.cover;
+    }
+  })().catch(() => undefined);
+  const item = { result, until: Date.now() + cacheLifetime };
+  folderCoverCache.set(key, item);
+  if (folderCoverCache.size > folderLimit) folderCoverCache.delete(folderCoverCache.keys().next().value);
+  result.then(cover => {
+    if (!cover && folderCoverCache.get(key) === item) folderCoverCache.delete(key);
+  });
+  return result;
+}
+
+async function folderCovers(settings, folders) {
+  const artwork = new Map();
+  if (!folders.length) return artwork;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 5_000);
+  let next = 0;
+  async function worker() {
+    while (!controller.signal.aborted && next < folders.length) {
+      const [path] = folders[next++];
+      const cover = await folderCover(settings, path, controller.signal);
+      if (cover) artwork.set(path, cover);
+    }
+  }
+  try {
+    await Promise.all(Array.from({ length: Math.min(folders.length, 4) }, worker));
+    return artwork;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function tracksWithMetadata(settings, files) {
   const tracks = files.map(([path, name]) => track(settings, path, name));
   const controller = new AbortController();
@@ -761,19 +848,7 @@ async function tracksWithMetadata(settings, files) {
     while (next < files.length) {
       const index = next++;
       const result = tracks[index];
-      const cached = metadataCache.get(result.id);
-      let meta = cached?.until > Date.now() ? cached.metadata : undefined;
-      if (!meta && !controller.signal.aborted) {
-        try {
-          meta = await metadataFor(settings, ...files[index], controller.signal);
-          if (!controller.signal.aborted) {
-            metadataCache.set(result.id, { metadata: meta, until: Date.now() + 600_000 });
-            if (metadataCache.size > 4096) metadataCache.delete(metadataCache.keys().next().value);
-          }
-        } catch {
-          // Metadata is optional. The track stays playable if probing fails.
-        }
-      }
+      const meta = await readMetadata(settings, files[index], controller.signal);
       if (!meta) continue;
       if (meta.name) result.name = meta.name;
       if (meta.duration) result.duration = meta.duration;

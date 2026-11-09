@@ -1,13 +1,13 @@
 {
   "id": "webdav4mygo",
   "name": "WebDAV",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "minAppVersion": "0.1.22",
   "main": "index.js",
   "playback": "stream",
   "permissions": { "network": ["*"], "process": ["bin/cover-*"] },
   "settings": [
-    { "key": "server", "label": "WebDAV URL", "help": "Full URL of the music folder, such as https://nas.example.com/dav/Music/." },
+    { "key": "server", "label": "WebDAV URL", "help": "Full URL of the music folder, such as https://nas.example.com/dav/Music/. The cover helper only caches embedded artwork and images behind WebDAV login. Browsing, playback and lyrics work without it." },
     { "key": "username", "label": "Username", "help": "Leave blank for an anonymous server." },
     { "key": "password", "label": "Password or app password", "help": "MyGo Music stores this value as plain text. Use a read-only account or a dedicated app password." }
   ],
