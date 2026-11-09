@@ -28,5 +28,7 @@
   "Page {number}": "第 {number} 页",
   "No supported audio files found.": "没有找到支持的音频文件。",
   "The music scan timed out. Try again or choose a smaller music folder.": "读取音乐目录超时。请重试，或设定更具体的音乐目录。",
-  "The music scan covers up to 512 folders. Choose a smaller music folder.": "最多扫描 512 个文件夹。请设定更具体的音乐目录。"
+  "The music scan covers up to 512 folders. Choose a smaller music folder.": "最多扫描 512 个文件夹。请设定更具体的音乐目录。",
+  "This song is no longer in the WebDAV folder.": "这首歌已不在 WebDAV 目录内。",
+  "This song has no artist information.": "这首歌缺少歌手信息。"
 }

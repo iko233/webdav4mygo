@@ -3,6 +3,7 @@ const folderCache = new Map();
 const cacheLifetime = 120_000;
 const folderLimit = 512;
 const pageSize = 50;
+const imageTypes = /\.(?:jpe?g|png|gif|webp)$/i;
 const audioTypes = new Set(["mp3", "flac", "wav", "m4a", "aac", "ogg"]);
 const propfind = '<propfind xmlns="DAV:"><prop><resourcetype/></prop></propfind>';
 
@@ -13,8 +14,11 @@ function fail(message, code) {
 }
 
 function base64(text) {
+  return encodeBase64(new TextEncoder().encode(text));
+}
+
+function encodeBase64(bytes) {
   const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-  const bytes = new TextEncoder().encode(text);
   let result = "";
   for (let i = 0; i < bytes.length; i += 3) {
     const value = (bytes[i] << 16) | ((bytes[i + 1] ?? 0) << 8) | (bytes[i + 2] ?? 0);
@@ -181,7 +185,7 @@ async function requestFolder(settings, folder, timeout) {
     const entries = new Map();
     for (const entry of davResponses(await response.text())) {
       const path = entryPath(entry, settings, folder);
-      if (path && (path.endsWith("/") || audioType(path))) entries.set(path, basename(path));
+      if (path && (path.endsWith("/") || audioType(path) || imageTypes.test(path))) entries.set(path, basename(path));
     }
     return [...entries].sort((a, b) => a[1].localeCompare(b[1], host.language(), { numeric: true }));
   } catch (error) {
@@ -209,7 +213,8 @@ function listFolder(settings, folder, timeout = 8_000) {
 
 export function setSetting() {
   folderCache.clear();
-  durationCache.clear();
+  metadataCache.clear();
+  sidecarCache.clear();
 }
 
 function readId(settings, id, isFolder) {
@@ -232,6 +237,62 @@ function itemId(settings, path) {
 
 function track(settings, path, name) {
   return { id: itemId(settings, path), name: name.replace(/\.[^.]+$/, "") || name };
+}
+
+function coversIn(listing) {
+  const images = new Map(listing.filter(([path]) => imageTypes.test(path)).map(([path, name]) => [name.toLowerCase(), path]));
+  const named = names => {
+    for (const name of names) {
+      for (const ext of ["jpg", "jpeg", "png", "webp", "gif"]) {
+        const path = images.get(name + "." + ext);
+        if (path) return path;
+      }
+    }
+  };
+  return { named };
+}
+
+function playlistEntry(settings, folder, name) {
+  return { id: itemId(settings, folder), name, mine: true, fixed: true };
+}
+
+export async function playlists() {
+  if (!host.setting("server")?.trim()) return [];
+  const settings = config();
+  return (await listFolder(settings, settings.root))
+    .filter(([path]) => path.endsWith("/"))
+    .map(([path, name]) => playlistEntry(settings, path, name));
+}
+
+export async function playlist({ id }) {
+  const settings = config();
+  const folder = readId(settings, id, true);
+  const listing = await listFolder(settings, folder);
+  const files = listing.filter(([path]) => !path.endsWith("/") && audioType(path));
+  const tracks = await tracksWithMetadata(settings, files);
+  return {
+    ...playlistEntry(settings, folder, folder === settings.root ? t("Music folders") : basename(folder)),
+    trackCount: tracks.length,
+    tracks,
+    imageUrl: tracks.find(track => track.album?.imageUrl)?.album.imageUrl,
+  };
+}
+
+export async function artist({ id }) {
+  const settings = config();
+  const path = readId(settings, id, false);
+  const folder = path.slice(0, path.lastIndexOf("/") + 1);
+  const listing = await listFolder(settings, folder);
+  const files = listing.filter(([file]) => !file.endsWith("/") && audioType(file));
+  const selected = files.find(([file]) => file === path);
+  if (!selected) throw fail(t("This song is no longer in the WebDAV folder."), "unavailable");
+  const nearby = files.filter(entry => entry !== selected).slice(0, pageSize - 1);
+  const tracks = await tracksWithMetadata(settings, [selected, ...nearby]);
+  const singer = tracks[0].artists?.[0];
+  if (!singer) throw fail(t("This song has no artist information."), "unavailable");
+  const matches = tracks.filter(track => track.artists?.[0]?.name === singer.name);
+  const portrait = matches.find(track => track.artists[0].imageUrl)?.artists[0].imageUrl;
+  return { artist: { ...singer, imageUrl: portrait }, tracks: matches };
 }
 
 function pageLinks(offset, more, pageFor) {
@@ -262,9 +323,9 @@ export async function browse({ page }) {
   for (const entry of await listFolder(settings, folder)) {
     const [path, name] = entry;
     if (path.endsWith("/")) links.push({ title: name, page: itemId(settings, path) });
-    else files.push(entry);
+    else if (audioType(path)) files.push(entry);
   }
-  const tracks = await tracksWithDuration(settings, files.slice(offset, offset + pageSize));
+  const tracks = await tracksWithMetadata(settings, files.slice(offset, offset + pageSize));
   return {
     title: folder === settings.root ? t("Music folders") : basename(folder),
     sections: [
@@ -294,6 +355,7 @@ async function catalogPage(settings, offset, terms) {
           folders.push(path);
           continue;
         }
+        if (!audioType(path)) continue;
         const relative = terms.length ? decodeURIComponent(path.slice(settings.root.length)).toLowerCase() : "";
         if (!terms.every(term => relative.includes(term))) continue;
         if (matched++ >= offset) files.push(entry);
@@ -311,8 +373,8 @@ async function allMusic(settings, offset) {
     subtitle: t("Page {number}").replace("{number}", String(offset / pageSize + 1)),
     sections: [
       // The app shows the first Home section as a card if it contains tracks.
-      { links: [{ title: t("Music folders"), page: "root" }] },
-      { title: t("Tracks"), tracks: await tracksWithDuration(settings, files), empty: t("No supported audio files found.") },
+      {},
+      { title: t("Tracks"), tracks: await tracksWithMetadata(settings, files), empty: t("No supported audio files found.") },
       ...pageLinks(offset, more, n => `all:${n}`),
     ],
   };
@@ -325,7 +387,7 @@ export async function search({ query, kind, offset = 0 }) {
 
   const settings = config();
   const { files, more } = await catalogPage(settings, offset, terms);
-  return { tracks: await tracksWithDuration(settings, files), more };
+  return { tracks: await tracksWithMetadata(settings, files), more };
 }
 
 export function stream({ id }) {
@@ -336,7 +398,7 @@ export function stream({ id }) {
   return { url: settings.origin + path, type, headers: settings.headers };
 }
 
-const durationCache = new Map();
+const metadataCache = new Map();
 const probeBytes = 16 * 1024;
 
 async function readAudioRange(url, headers, signal, start, count) {
@@ -520,10 +582,10 @@ async function oggSeconds(bytes, size, read) {
   return 0;
 }
 
-async function probeDuration(settings, path, signal) {
+async function probeMetadata(settings, path, signal) {
   const url = settings.origin + path;
   const head = await readAudioRange(url, settings.headers, signal, 0, probeBytes);
-  if (!head) return 0;
+  if (!head) return {};
 
   let window = { start: 0, bytes: head.bytes };
   const read = async (start, count) => {
@@ -531,12 +593,14 @@ async function probeDuration(settings, path, signal) {
     if (count <= 0) return new Uint8Array();
     const offset = start - window.start;
     if (offset >= 0 && offset + count <= window.bytes.length) return window.bytes.subarray(offset, offset + count);
+    if (start + count <= head.bytes.length) return head.bytes.subarray(start, start + count);
     const range = await readAudioRange(url, settings.headers, signal, start, Math.max(count, 2048));
     window = { start, bytes: range?.bytes ?? new Uint8Array() };
     return window.bytes.subarray(0, count);
   };
 
   const type = audioType(path);
+  const tags = {};
   let seconds;
   if (type === "m4a") seconds = await mp4Seconds(head.size, read);
   else if (type === "wav") seconds = await wavSeconds(head.bytes, read);
@@ -548,30 +612,113 @@ async function probeDuration(settings, path, signal) {
     if (type === "mp3") seconds = mp3Seconds(bytes, head.size - start);
     if (type === "aac") seconds = aacSeconds(bytes, head.size - start);
   }
-  return Number.isFinite(seconds) && seconds > 0 && seconds < 31536000 ? Math.round(seconds * 1000) : 0;
+  if (Number.isFinite(seconds) && seconds > 0 && seconds < 31536000) tags.duration = Math.round(seconds * 1000);
+
+  try {
+    const tagLength = id3Length(head.bytes);
+    if (tagLength) id3Tags(await read(0, Math.min(tagLength, maxTagBytes)), tags);
+    if (type === "flac") await flacTags(tagLength, read, tags);
+    if (type === "m4a") await mp4Tags(head.size, read, tags);
+    if (type === "ogg" && !oggTags(head.bytes, tags) && head.size > head.bytes.length) {
+      oggTags(await read(0, Math.min(head.size, maxTagBytes)), tags);
+    }
+    if (type === "wav") wavTags(head.bytes, tags);
+  } catch {
+    // Duration and any tags already parsed remain usable.
+  }
+  return tags;
 }
 
-async function tracksWithDuration(settings, files) {
+const sidecarCache = new Map();
+
+async function cachePicture(bytes) {
+  if (!bytes?.length || bytes.length > maxTagBytes) return;
+  let child;
+  try {
+    const extension = host.platform === "windows" ? ".exe" : "";
+    child = host.spawn(`bin/cover-${host.platform}-${host.arch}${extension}`, [host.dataDir]);
+    child.write(encodeBase64(bytes));
+    child.closeStdin();
+    const path = await child.readLine();
+    if (await child.wait() === 0 && path?.startsWith("file://")) return path;
+  } catch {
+    try { child?.kill(); } catch { /* It already stopped. */ }
+  }
+}
+
+function sidecarPicture(settings, path, signal) {
+  if (!path) return;
+  const url = settings.origin + path;
+  if (!settings.headers.Authorization) return url;
+  const key = settings.library + ":" + path;
+  if (!sidecarCache.has(key)) {
+    const value = (async () => {
+      try {
+        const image = await readAudioRange(url, settings.headers, signal, 0, maxTagBytes + 1);
+        if (image && image.bytes.length <= maxTagBytes) return await cachePicture(image.bytes);
+      } catch {
+        // A missing or inaccessible sidecar leaves the artwork blank.
+      }
+    })();
+    sidecarCache.set(key, value);
+    if (sidecarCache.size > 512) sidecarCache.delete(sidecarCache.keys().next().value);
+    value.then(result => { if (!result && sidecarCache.get(key) === value) sidecarCache.delete(key); });
+  }
+  return sidecarCache.get(key);
+}
+
+async function metadataFor(settings, path, name, signal) {
+  const tags = await probeMetadata(settings, path, signal).catch(() => ({}));
+  const metadata = {
+    name: tags.name,
+    artist: tags.artist || tags.albumArtist,
+    album: tags.album,
+    duration: tags.duration,
+  };
+  metadata.cover = await cachePicture(tags.cover);
+  metadata.artistPicture = await cachePicture(tags.artistPicture);
+  if ((!metadata.cover || !metadata.artistPicture) && !signal.aborted) {
+    const folder = path.slice(0, path.lastIndexOf("/") + 1);
+    const { named } = coversIn(await listFolder(settings, folder));
+    const stem = name.replace(/\.[^.]+$/, "").toLowerCase();
+    metadata.cover ||= await sidecarPicture(settings, named([stem, "cover", "folder", "front", "album", "artwork"]), signal);
+    metadata.artistPicture ||= await sidecarPicture(settings, named(["artist", "performer", "band"]), signal);
+  }
+  metadata.cover ||= metadata.artistPicture;
+  return metadata;
+}
+
+async function tracksWithMetadata(settings, files) {
   const tracks = files.map(([path, name]) => track(settings, path, name));
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 6_000);
+  const timer = setTimeout(() => controller.abort(), 8_000);
   let next = 0;
   async function worker() {
-    while (!controller.signal.aborted && next < files.length) {
+    while (next < files.length) {
       const index = next++;
-      const key = tracks[index].id;
-      const cached = durationCache.get(key);
-      let duration = cached?.until > Date.now() ? cached.duration : undefined;
-      if (duration === undefined) {
+      const result = tracks[index];
+      const cached = metadataCache.get(result.id);
+      let meta = cached?.until > Date.now() ? cached.metadata : undefined;
+      if (!meta && !controller.signal.aborted) {
         try {
-          duration = await probeDuration(settings, files[index][0], controller.signal);
-          durationCache.set(key, { duration, until: Date.now() + (duration ? 600_000 : 120_000) });
-          if (durationCache.size > 4096) durationCache.delete(durationCache.keys().next().value);
+          meta = await metadataFor(settings, ...files[index], controller.signal);
+          if (!controller.signal.aborted) {
+            metadataCache.set(result.id, { metadata: meta, until: Date.now() + 600_000 });
+            if (metadataCache.size > 4096) metadataCache.delete(metadataCache.keys().next().value);
+          }
         } catch {
           // Metadata is optional. The track stays playable if probing fails.
         }
       }
-      if (duration) tracks[index].duration = duration;
+      if (!meta) continue;
+      if (meta.name) result.name = meta.name;
+      if (meta.duration) result.duration = meta.duration;
+      if (meta.artist) result.artists = [{
+        id: result.id,
+        name: meta.artist,
+        imageUrl: meta.artistPicture,
+      }];
+      if (meta.album || meta.cover) result.album = { name: meta.album || "", imageUrl: meta.cover };
     }
   }
   try {
@@ -579,5 +726,230 @@ async function tracksWithDuration(settings, files) {
     return tracks;
   } finally {
     clearTimeout(timer);
+  }
+}
+
+const maxTagBytes = 1024 * 1024;
+const utf8 = new TextDecoder();
+
+function textTag(bytes, encoding = 3) {
+  const utf16 = bytes[0] === 0xfe && bytes[1] === 0xff ? "utf-16be" : "utf-16le";
+  const label = ["windows-1252", utf16, "utf-16be", "utf-8"][encoding] || "utf-8";
+  try {
+    return new TextDecoder(label).decode(bytes).replace(/\0/g, " / ").replace(/(?:\s*\/\s*)+$/, "").trim();
+  } catch {
+    // Some MyGo runtimes expose only a subset of TextDecoder encodings.
+    if (encoding === 0) return Array.from(bytes, byte => String.fromCharCode(byte)).join("").replace(/\0/g, " ").trim();
+    if (encoding === 1 || encoding === 2) {
+      const big = encoding === 2 || (bytes[0] === 0xfe && bytes[1] === 0xff);
+      const bom = (bytes[0] === 0xfe && bytes[1] === 0xff) || (bytes[0] === 0xff && bytes[1] === 0xfe);
+      const view = data(bytes);
+      let value = "";
+      for (let offset = bom ? 2 : 0; offset + 1 < bytes.length; offset += 2) {
+        const code = view.getUint16(offset, !big);
+        if (code) value += String.fromCharCode(code);
+      }
+      return value.trim();
+    }
+    return "";
+  }
+}
+
+function picture(tags, type, bytes) {
+  if (!bytes.length || bytes.length > maxTagBytes) return;
+  if (type === 8) tags.artistPicture ||= bytes;
+  else if (type === 3 || type === 0) {
+    if (!tags.cover || type === 3) tags.cover = bytes;
+  }
+}
+
+function id3Tags(bytes, tags) {
+  if (bytes.length < 10 || !ascii(bytes, 0, "ID3")) return;
+  const version = bytes[3];
+  if (version < 2 || version > 4) return;
+  const syncSize = (at, b) => (b[at] << 21) + (b[at + 1] << 14) + (b[at + 2] << 7) + b[at + 3];
+  const names = { TT2: "name", TIT2: "name", TP1: "artist", TPE1: "artist", TAL: "album", TALB: "album" };
+  let frames = bytes.subarray(10, Math.min(bytes.length, 10 + syncSize(6, bytes)));
+  if ((bytes[5] & 128) && version < 4) frames = frames.filter((byte, i) => byte !== 0 || frames[i - 1] !== 255);
+  const view = data(frames);
+  let at = 0;
+  if (version > 2 && (bytes[5] & 64)) {
+    if (frames.length < 4) return;
+    at = version === 4 ? syncSize(0, frames) : 4 + view.getUint32(0);
+  }
+  const header = version === 2 ? 6 : 10;
+  const idLength = version === 2 ? 3 : 4;
+  while (at + header <= frames.length) {
+    const key = utf8.decode(frames.subarray(at, at + idLength));
+    if (!/^[A-Z0-9]+$/.test(key)) break;
+    const size = version === 2 ? view.getUint32(at + 2) & 0xffffff :
+      version === 4 ? syncSize(at + 4, frames) : view.getUint32(at + 4);
+    const flags = version === 2 ? 0 : frames[at + 9];
+    const end = at + header + size;
+    if (end > frames.length) break;
+    let value = frames.subarray(at + header, end);
+    at = end;
+    if (!size || (version === 3 && (flags & 224)) || (version === 4 && (flags & 77))) continue;
+    if (version === 4 && (flags & 2)) value = value.filter((byte, i) => byte !== 0 || value[i - 1] !== 255);
+    const encoding = value[0];
+    if (names[key]) tags[names[key]] ||= textTag(value.subarray(1), encoding);
+    if (key !== "APIC" && key !== "PIC") continue;
+    const kindAt = key === "PIC" ? 4 : value.indexOf(0, 1) + 1;
+    if (kindAt <= 1 || kindAt + 1 >= value.length) continue;
+    const step = encoding === 1 || encoding === 2 ? 2 : 1;
+    let start = kindAt + 1;
+    while (start + step <= value.length && (value[start] || (step === 2 && value[start + 1]))) start += step;
+    picture(tags, value[kindAt], value.subarray(start + step));
+  }
+}
+
+function vorbisTags(bytes, tags) {
+  if (bytes.length < 8) return;
+  const view = data(bytes);
+  let at = 4 + view.getUint32(0, true);
+  if (at + 4 > bytes.length) return;
+  const count = view.getUint32(at, true);
+  at += 4;
+  const names = { TITLE: "name", ARTIST: "artist", ALBUM: "album" };
+  for (let i = 0; i < count && at + 4 <= bytes.length; i++) {
+    const length = view.getUint32(at, true);
+    at += 4;
+    if (at + length > bytes.length) break;
+    const field = bytes.subarray(at, at + length);
+    at += length;
+    const equals = field.indexOf(61);
+    if (equals < 0) continue;
+    const key = utf8.decode(field.subarray(0, equals)).toUpperCase();
+    if (names[key]) tags[names[key]] ||= textTag(field.subarray(equals + 1));
+    if (key === "METADATA_BLOCK_PICTURE" && field.length <= maxTagBytes) {
+      try {
+        const raw = atob(utf8.decode(field.subarray(equals + 1)));
+        flacPicture(Uint8Array.from(raw, char => char.charCodeAt(0)), tags);
+      } catch {
+        // A malformed picture leaves the text tags usable.
+      }
+    }
+  }
+}
+
+function flacPicture(bytes, tags) {
+  if (bytes.length < 32) return;
+  const view = data(bytes);
+  const description = 8 + view.getUint32(4);
+  if (description + 24 > bytes.length) return;
+  const payload = description + 24 + view.getUint32(description);
+  if (payload > bytes.length) return;
+  const size = view.getUint32(payload - 4);
+  if (size <= bytes.length - payload) picture(tags, view.getUint32(0), bytes.subarray(payload, payload + size));
+}
+
+async function flacTags(start, read, tags) {
+  let at = start + 4;
+  for (let block = 0; block < 32; block++) {
+    const header = await read(at, 4);
+    if (header.length !== 4) return;
+    const type = header[0] & 127;
+    const size = (header[1] << 16) + (header[2] << 8) + header[3];
+    if ((type === 4 || type === 6) && size <= maxTagBytes) {
+      const bytes = await read(at + 4, size);
+      if (type === 4) vorbisTags(bytes, tags);
+      if (type === 6) flacPicture(bytes, tags);
+    }
+    if (header[0] & 128) return;
+    at += 4 + size;
+  }
+}
+
+function oggTags(bytes, tags) {
+  let at = 0;
+  let packet = [];
+  while (at + 27 <= bytes.length && ascii(bytes, at, "OggS")) {
+    const count = bytes[at + 26];
+    let payload = at + 27 + count;
+    if (payload > bytes.length) return;
+    for (let i = 0; i < count; i++) {
+      const size = bytes[at + 27 + i];
+      if (payload + size > bytes.length) return;
+      packet.push(bytes.subarray(payload, payload + size));
+      payload += size;
+      if (size === 255) continue;
+      if (packet[0][0] === 3 && ascii(packet[0], 1, "vorbis")) {
+        const joined = new Uint8Array(packet.reduce((total, part) => total + part.length, 0));
+        let offset = 0;
+        for (const part of packet) {
+          joined.set(part, offset);
+          offset += part.length;
+        }
+        vorbisTags(joined.subarray(7), tags);
+        return true;
+      }
+      packet = [];
+    }
+    at = payload;
+  }
+}
+
+async function mp4Box(start, end, read, predicate) {
+  for (let i = 0; i < 128 && start + 8 <= end; i++) {
+    const head = await read(start, 16);
+    if (head.length < 8) return;
+    const view = data(head);
+    let size = view.getUint32(0);
+    const header = size === 1 ? 16 : 8;
+    if (head.length < header) return;
+    if (size === 1) size = uint64(view, 8);
+    if (size === 0) size = end - start;
+    if (size < header || size > end - start) return;
+    const type = String.fromCharCode(...head.subarray(4, 8));
+    const box = { type, start: start + header, end: start + size };
+    if (predicate(box)) return box;
+    start += size;
+  }
+}
+
+async function mp4Tags(size, read, tags) {
+  const moov = await mp4Box(0, size, read, box => box.type === "moov");
+  if (!moov) return;
+  const udta = await mp4Box(moov.start, moov.end, read, box => box.type === "udta");
+  const parent = udta || moov;
+  const meta = await mp4Box(parent.start, parent.end, read, box => box.type === "meta");
+  if (!meta) return;
+  const ilst = await mp4Box(meta.start + 4, meta.end, read, box => box.type === "ilst");
+  if (!ilst) return;
+  const names = { "©nam": "name", "©ART": "artist", "©alb": "album", aART: "albumArtist", covr: "cover" };
+  let at = ilst.start;
+  for (let i = 0; i < 20; i++) {
+    const field = await mp4Box(at, ilst.end, read, box => !!names[box.type]);
+    if (!field) return;
+    at = field.end;
+    const value = await mp4Box(field.start, field.end, read, box => box.type === "data");
+    if (!value) continue;
+    const length = value.end - value.start - 8;
+    if (length <= 0 || length > maxTagBytes) continue;
+    const bytes = await read(value.start + 8, length);
+    if (field.type === "covr") picture(tags, 3, bytes);
+    else tags[names[field.type]] ||= textTag(bytes);
+  }
+}
+
+function wavTags(bytes, tags) {
+  const names = { INAM: "name", IART: "artist", IPRD: "album" };
+  if (bytes.length < 12 || !ascii(bytes, 0, "RIFF")) return;
+  const view = data(bytes);
+  for (let at = 12; at + 8 <= bytes.length;) {
+    const length = view.getUint32(at + 4, true);
+    const end = at + 8 + length;
+    if (end > bytes.length) return;
+    if (ascii(bytes, at, "id3 ") || ascii(bytes, at, "ID3 ")) id3Tags(bytes.subarray(at + 8, end), tags);
+    if (ascii(bytes, at, "LIST") && ascii(bytes, at + 8, "INFO")) {
+      for (let field = at + 12; field + 8 <= end;) {
+        const size = view.getUint32(field + 4, true);
+        if (field + 8 + size > end) break;
+        const name = names[utf8.decode(bytes.subarray(field, field + 4))];
+        if (name) tags[name] ||= textTag(bytes.subarray(field + 8, field + 8 + size));
+        field += 8 + size + (size % 2);
+      }
+    }
+    at = end + (length % 2);
   }
 }

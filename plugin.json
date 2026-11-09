@@ -1,11 +1,11 @@
 {
   "id": "webdav4mygo",
   "name": "WebDAV",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "minAppVersion": "0.1.22",
   "main": "index.js",
   "playback": "stream",
-  "permissions": { "network": ["*"] },
+  "permissions": { "network": ["*"], "process": ["bin/cover-*"] },
   "settings": [
     { "key": "server", "label": "WebDAV URL", "help": "Full URL of the music folder, such as https://nas.example.com/dav/Music/." },
     { "key": "username", "label": "Username", "help": "Leave blank for an anonymous server." },
