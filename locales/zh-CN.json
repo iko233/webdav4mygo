@@ -1,6 +1,6 @@
 {
   "WebDAV URL": "WebDAV 地址",
-  "Full URL of the music folder, such as https://nas.example.com/dav/Music/. The cover helper only caches embedded artwork and images behind WebDAV login. Browsing, playback and lyrics work without it.": "填音乐目录的完整地址，例如 https://nas.example.com/dav/Music/。封面助手只把内嵌封面和需要登录才能读取的图片写入本地缓存。不授权也可以浏览、播放和加载歌词。",
+  "Full URL of the music folder, such as https://nas.example.com/dav/Music/. The cover helper only caches embedded artwork and images behind WebDAV login. Browsing, playback and lyrics work without it.": "填音乐目录的完整地址，例如 https://nas.example.com/dav/Music/。bin/cover-*程序只把内嵌封面和需要登录才能读取的图片写入本地缓存。不授权也可以浏览、播放和加载歌词。",
   "Username": "用户名",
   "Leave blank for an anonymous server.": "匿名服务器可留空。",
   "Password or app password": "密码或应用密码",
