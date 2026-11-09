@@ -3,6 +3,7 @@ const folderCache = new Map();
 const cacheLifetime = 120_000;
 const folderLimit = 512;
 const pageSize = 50;
+const lyricType = /\.lrc$/i;
 const imageTypes = /\.(?:jpe?g|png|gif|webp)$/i;
 const audioTypes = new Set(["mp3", "flac", "wav", "m4a", "aac", "ogg"]);
 const propfind = '<propfind xmlns="DAV:"><prop><resourcetype/></prop></propfind>';
@@ -185,7 +186,7 @@ async function requestFolder(settings, folder, timeout) {
     const entries = new Map();
     for (const entry of davResponses(await response.text())) {
       const path = entryPath(entry, settings, folder);
-      if (path && (path.endsWith("/") || audioType(path) || imageTypes.test(path))) entries.set(path, basename(path));
+      if (path && (path.endsWith("/") || audioType(path) || imageTypes.test(path) || lyricType.test(path))) entries.set(path, basename(path));
     }
     return [...entries].sort((a, b) => a[1].localeCompare(b[1], host.language(), { numeric: true }));
   } catch (error) {
@@ -390,6 +391,63 @@ export async function search({ query, kind, offset = 0 }) {
   return { tracks: await tracksWithMetadata(settings, files), more };
 }
 
+export async function lyrics({ id }) {
+  const settings = config();
+  const path = readId(settings, id, false);
+  if (!audioType(path)) return {};
+  const stem = path.slice(0, path.lastIndexOf("."));
+  const folder = path.slice(0, path.lastIndexOf("/") + 1);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 6_000);
+  const limit = 256 * 1024;
+  async function loadLrc(urlPath) {
+    const response = await fetch(settings.origin + urlPath, {
+      headers: settings.headers, redirect: "error", signal: controller.signal,
+    });
+    if (!response.ok) {
+      await response.body?.cancel();
+      return "";
+    }
+    const bytes = await readResponseBytes(response, limit + 1);
+    return bytes.length <= limit ? normalizeLrc(bytes) : "";
+  }
+  try {
+    const direct = stem + ".lrc";
+    let lrc = await loadLrc(direct);
+    if (!lrc && !controller.signal.aborted) {
+      const listing = await listFolder(settings, folder, 4_000);
+      const alternate = listing.find(([entry]) => entry !== direct && lyricType.test(entry) && entry.slice(0, -4) === stem);
+      if (alternate) lrc = await loadLrc(alternate[0]);
+    }
+    return lrc ? { lrc } : {};
+  } catch {
+    return {};
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function normalizeLrc(bytes) {
+  const encoding = bytes[0] === 0xff && bytes[1] === 0xfe ? "utf-16le" :
+    bytes[0] === 0xfe && bytes[1] === 0xff ? "utf-16be" : "utf-8";
+  const text = new TextDecoder(encoding).decode(bytes).replace(/^\uFEFF/, "");
+  // NetEase exports some credits as JSON lines before the timestamped lyrics.
+  return text.split(/\r?\n/).map(line => {
+    if (!line.trimStart().startsWith("{")) return line;
+    try {
+      const entry = JSON.parse(line);
+      if (!Number.isSafeInteger(entry.t) || entry.t < 0 || !Array.isArray(entry.c)) return "";
+      const credit = entry.c.map(part => typeof part?.tx === "string" ? part.tx : "").join("").trim();
+      if (!credit) return "";
+      const seconds = Math.floor(entry.t / 1000);
+      const time = `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}.${String(entry.t % 1000).padStart(3, "0")}`;
+      return `[${time}]${credit}`;
+    } catch {
+      return "";
+    }
+  }).join("\n");
+}
+
 export function stream({ id }) {
   const settings = config();
   const path = readId(settings, id, false);
@@ -407,14 +465,20 @@ async function readAudioRange(url, headers, signal, start, count) {
     redirect: "error",
     signal,
   });
-  const reader = response.body?.getReader();
-  if (!reader) return null;
+  const range = /^bytes (\d+)-(\d+)\/(\d+|\*)$/i.exec(response.headers.get("content-range") || "");
+  const partial = response.status === 206 && range && Number(range[1]) === start;
+  if (!partial && (response.status !== 200 || start !== 0)) {
+    await response.body?.cancel();
+    return null;
+  }
+  const size = Number(partial ? range[3] : response.headers.get("content-length"));
+  return { bytes: await readResponseBytes(response, count), size };
+}
 
+async function readResponseBytes(response, count) {
+  const reader = response.body?.getReader();
+  if (!reader) return new Uint8Array();
   try {
-    const range = /^bytes (\d+)-(\d+)\/(\d+|\*)$/i.exec(response.headers.get("content-range") || "");
-    const partial = response.status === 206 && range && Number(range[1]) === start;
-    if (!partial && (response.status !== 200 || start !== 0)) return null;
-    const size = Number(partial ? range[3] : response.headers.get("content-length"));
     const bytes = new Uint8Array(count);
     let length = 0;
     while (length < count) {
@@ -424,7 +488,7 @@ async function readAudioRange(url, headers, signal, start, count) {
       bytes.set(chunk, length);
       length += chunk.length;
     }
-    return { bytes: bytes.subarray(0, length), size };
+    return bytes.subarray(0, length);
   } finally {
     try { await reader.cancel(); } catch { /* The request may already be closed. */ }
   }

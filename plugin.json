@@ -1,7 +1,7 @@
 {
   "id": "webdav4mygo",
   "name": "WebDAV",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "minAppVersion": "0.1.22",
   "main": "index.js",
   "playback": "stream",
