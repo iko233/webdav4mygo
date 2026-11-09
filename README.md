@@ -6,7 +6,7 @@
 
 ## 安装
 
-1. 在安装页点击「打开 MyGo Music 安装」。安装页会调用 `mygo-music://install-plugin?repo=iko233/webdav4mygo`。
+1. 打开安装页会尝试唤起 MyGo Music。如果浏览器拦截自动唤起，点击「打开 MyGo Music 安装」。
 2. 也可以在 MyGo Music 0.1.22 或更新版本中进入「设置 → 插件 → +」，从 GitHub 安装并输入 `iko233/webdav4mygo`，或选择本地 ZIP。
 3. 在插件设置中填写音乐目录的完整 WebDAV URL，例如 `https://nas.example.com/dav/Music/`。需要认证时填写用户名和密码。匿名服务器将两项留空。
 4. 切换到 WebDAV 音源，打开「音乐文件夹」。

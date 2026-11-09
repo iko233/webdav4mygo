@@ -14,9 +14,12 @@
 </style>
 <main>
   <h1>安装 webdav4mygo</h1>
-  <p>把 WebDAV 音乐目录接入 MyGo Music。</p>
-  <a class="install" href="mygo-music://install-plugin?repo=iko233/webdav4mygo">打开 MyGo Music 安装</a>
+  <p>正在尝试打开 MyGo Music。如果播放器没有打开，请点下面的按钮。</p>
+  <a class="install" id="install" href="mygo-music://install-plugin?repo=iko233/webdav4mygo">打开 MyGo Music 安装</a>
   <p>也可以在「设置 → 插件 → +」中输入 <code>iko233/webdav4mygo</code>。</p>
   <a href="https://github.com/iko233/webdav4mygo">查看源码和设置说明</a>
 </main>
+<script>
+  window.location.href = document.getElementById("install").href;
+</script>
 </html>
