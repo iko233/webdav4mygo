@@ -265,7 +265,7 @@ export async function playlists() {
   const artwork = await folderCovers(settings, folders);
   return folders.map(([path, name]) => ({
     ...playlistEntry(settings, path, name),
-    imageUrl: artwork.get(path) || blankFolderCover(),
+    imageUrl: artwork.get(path),
   }));
 }
 
@@ -279,7 +279,7 @@ export async function playlist({ id }) {
     ...playlistEntry(settings, folder, folder === settings.root ? t("Music folders") : basename(folder)),
     trackCount: tracks.length,
     tracks,
-    imageUrl: tracks.find(track => track.album?.imageUrl)?.album.imageUrl || blankFolderCover(),
+    imageUrl: tracks.find(track => track.album?.imageUrl)?.album.imageUrl,
   };
 }
 
@@ -336,7 +336,7 @@ export async function browse({ page }) {
     folderCovers(settings, children),
   ]);
   for (const [path, name] of children) {
-    links.push({ title: name, page: itemId(settings, path), imageUrl: artwork.get(path) || blankFolderCover() });
+    links.push({ title: name, page: itemId(settings, path), imageUrl: artwork.get(path) });
   }
   return {
     title: folder === settings.root ? t("Music folders") : basename(folder),
@@ -764,11 +764,6 @@ async function metadataFor(settings, path, name, signal) {
 }
 
 const folderCoverCache = new Map();
-
-function blankFolderCover() {
-  const path = host.dir.replace(/\\/g, "/").split("/").map(encodeURIComponent).join("/");
-  return `file://${path.startsWith("/") ? "" : "/"}${path}/assets/blank.png`;
-}
 
 function cachedMetadata(settings, path) {
   const cached = metadataCache.get(itemId(settings, path));
