@@ -2,7 +2,7 @@
 
 把 NAS 或网盘上的 WebDAV 音乐目录接入 [MyGo Music](https://music.egoist.dev/zh/plugins/)。
 
-[![安装到 MyGo Music](docs/install.svg)](mygo-music://install-plugin?repo=iko233/webdav4mygo)
+[![安装到 MyGo Music](docs/install.svg)](https://iko233.github.io/webdav4mygo/)
 
 ## 安装
 
